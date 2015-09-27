@@ -1,0 +1,220 @@
+---
+title: "Predicting the way barbel lifts were performed by 6 persons"
+author: "Peter Knapen"
+date: "09/19/2015"
+output: html_document
+---
+
+#Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.   
+In this project, our goal will be to use data from accelerometers on the belt, forearm, arm and dumbbell of 6 participants in order to predict  whether an excercise is performed correctly or not. The participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).   
+As only a subset of the data was provided, the way the exercise was performed should be predicted from this reduced set.   
+First the data was reduced from 160 to 60 variables by removing columns with Na and NAN's, which mostly were calculated by Vellosso $et \  all$.  
+Next with randomForest the complete model was analysed. Based on cross validation 13 variables were selected to build the second model. It is shown that this reduction in data does not increase the out of sample error much.
+
+#Introduction 
+
+The training data for this project are available here:   
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv.  
+The test data are available here:  
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv.  
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.   
+Vellosso $et \  all$ describe in their document that they want to predict whether lifting a dumbbell is done correctly or not. For this purpose 6 persons have performed 10 repetitions of correct lifting and of 4 defined mistakes, while measuring the accelerations, Euler angels and magnetic field disturbances with 4 transducers, mounted on the belt, the fore arm and arm. They post-processed this data and calculated an additional set of variables, like kurtosis, skewness, amplitude, mean, std, min and max and got the best predictions by selecting a subset when a 2.5 second time window was used  with an overlap of 0.5 seconds.  
+The goal of this project is to predict the manner in which these 6 persons did the exercise. This is the "classe" variable in the training set.
+
+ 
+# Retrieving and pre-processing data
+The data is downloaded from the above mentioned sources. The original data is loaded directly from the website
+```{r,cache=TRUE, results='hide'}
+require(downloader)
+require(curl)
+require(doMC)
+require(caret)
+require(ggplot2)
+require(dplyr)
+require(GGally)
+require(knitr)
+#require(printr)
+set.seed(12345)
+if(!file.exists("pml-training.csv")){
+url1<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(url1,"~/Coursera/Practical_machine_learning/course_project/pml-training.csv", method="curl")
+}
+training<-read.table("pml-training.csv", header=TRUE, sep=c(","),na.strings = c("NA", "#DIV/0!", ""))
+training2 <- training[,colSums(is.na(training)) == 0]
+str(training)
+training3<-read.table("WearableComputing_weight_lifting_exercises_biceps_curl_variations.csv", header=TRUE, sep=",")
+
+training4<-filter(training3,new_window=="yes")
+if(!file.exists("pml-testing.csv")){
+url1<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(url1,"~/Coursera/Practical_machine_learning/course_project/pml-testing.csv", method="curl")
+}
+testing<-read.table("pml-testing.csv", header=TRUE, sep=",",na.strings = c("NA", "#DIV/0!", ""))
+testing2 <- testing[,colSums(is.na(testing)) == 0]
+str(testing)
+training2$classe<-as.factor(training2$classe)
+```
+By omitting the columns with NA, NaN (#DIV/0!) and empty fields, we can reduce the number of variables from 160 to 60.
+As testing2 shows no column for classe, we will split the training set into a new training and testing set for training and testing purposes.
+The first 7 variables are not prediction variables, but used by Vellosso $et \  all$ in order to calculate their 97 derived variables.
+```{r,cache=TRUE,results='hide'}
+inTrain <- createDataPartition(y=training2$classe,
+                              p=0.8, list=FALSE)
+training5 <- training2[inTrain,]
+M <- abs(cor(training5[,-c(1:7,60)]))
+diag(M) <- 0
+which(M > 0.8,arr.ind=T)
+testing5 <- training2[-inTrain,]
+```
+It turns out the 60 signals 38 have a correlation of more than 80%. I did not leave out these columns, as this could cause bias in the outcome. Due to kinematic joints in the body (eg. shoulder,elbow, wrist), a lot of these signals can be correlated.    
+
+# Building the randomForest model.   
+Model 1 is calculated with all remaining 52 predictors, using parallel processing. With 16GB and 8 cores (Intel® Core™ i7-4900MQ CPU @ 2.80GHz × 8 ), it took 20 minutes to calculate.
+
+```{r,cache=TRUE}
+registerDoMC(cores=8)
+name1<-names(training5)
+model1<-train(classe~.-X -user_name -raw_timestamp_part_1 -raw_timestamp_part_2 -cvtd_timestamp -new_window -num_window, method="rf",data=training5)
+```
+The most important predictors can be calculated by using the function varImp from the carret package.
+Predictions can be calculated using the training-set.
+
+```{r,cache=TRUE, results='hide'}
+mostImp<-varImp(model1)
+predict1<-predict(model1,newdata=training5)
+C1 <- confusionMatrix(training5$classe, predict1)
+insample1<-(1-C1$overall[[1]])*100 
+```
+The 20 most important variables are:   
+```{r, cache=TRUE}
+mostImp
+plot(mostImp)
+```
+
+From the confusionMatrix the in-sample error can be calculated as 1-accuracy, in this case `r format(insample1, digits=2)` percent. The out of sample will be larger, as this is based on the confusion matrix where predictions are compared to the test set. This will be done later on.
+Now use cross validation to determine the expected error when reducing the number of variables taken into the model.
+
+```{r, fig.width=11,cache=TRUE}
+result<-rfcv(training5[8:59], training5[,60], cv.fold=5)
+with(result, plot(n.var, error.cv, log="x", type="o", lwd=2))
+```
+From the plot above, it can be seen that the error drops significantly till 13 variables are used.
+```{r,cache=TRUE}
+mostImp2<-mostImp$importance %>%
+         mutate(ind=c(1:length(Overall))) %>%   
+         filter(Overall >20) 
+mostImp3<-mostImp2[with(mostImp2,order(-Overall,-ind)),]
+index<-mostImp3$ind
+#mostImp3
+
+```
+Model2 is built using these 13 variables.
+```{r,cache=TRUE}
+# I could not get the colums selected, without reducing the data frame, so I put in the columns manually
+registerDoMC(cores=8)
+model2<-train(classe~+roll_belt + yaw_belt +magnet_dumbbell_z + magnet_dumbbell_y + pitch_forearm + pitch_belt + magnet_dumbbell_x + roll_forearm + magnet_belt_z + roll_dumbbell + accel_dumbbell_y + accel_belt_z +magnet_belt_y, method="rf",data=training5)
+```
+With model2 we can predict classe and calculate a new confusionMatrix based on the trainings set.
+```{r,cache=TRUE}
+predict2<-predict(model2,newdata=training5)
+C2 <- confusionMatrix(training5$classe, predict2)
+insample2<-(1-C2$overall[[1]])*100 
+
+```
+The in-sample error can also be calculated for this model: `r format(insample2, digits=2)` percent, which is smaller than the one for the complete model (model1)
+
+#Predictions for the testing set
+With model1 ( the complete model), predictions for the testing data and its confusion matrix can be calculated:
+```{r,cache=TRUE}
+predict3<-predict(model1,newdata=testing5)
+C3 <- confusionMatrix(testing5$classe, predict3)
+outsample1<-(1-C3$overall[[1]])*100 
+C3
+```
+The out of sample error for model1 is `r format(outsample1, digits=2)` percent   
+The same can be done for model 2, resulting in:
+```{r,cache=TRUE}
+predict4<-predict(model2,newdata=testing5)
+C4 <- confusionMatrix(testing5$classe, predict4)
+outsample2<-(1-C4$overall[[1]])*100 
+C4
+```
+The outof sample error is `r format(outsample2, digits=2)` percent, somewhat higher than the one for model 1, but still small.   
+Based on model2, the predictions can be calculated for the testing data from testing2, which are needed for part 2 of the assignment:
+```{r,cache=TRUE}
+
+predict5<-predict(model2,newdata=testing2)
+answer<-as.character(predict5)
+```
+`r answer`    
+
+#Conclusions
+We have constructed a model based on 13 out of 52 predictor variables, which gave an out-sample error of less than 2 percent.
+When we tested this with the original test data we got a score of 100 percent, so the samples in the testing data were not that close to the borders of the classe variables as was in the self constructed testing set.
+\newpage
+
+#Appendix
+From the original 160 variables in the original data, only 52 variables are used for building model1:
+`r name1[8:59]`  
+classe is a variable with 5 levels:  
+- A: correct performed    
+- B: throwing the elbows to the front   
+- C: lifting the dumbbell only halfway   
+- D: lowering the dumbbell only halfway   
+- E: throwing the hips to the front.
+
+Variables used:   
+training: data frame based on training set given.   
+training2: training, Na, NaN and empty fields removed.   
+training3: the original data set used by Vellosso $et \  all$   
+training4: training3, only with 'new windows'   
+testing: data frame based on testing set given   
+testing2: testing, NA, NaN and empty fields removed   
+inTrain: 80% of training2 for training purposes   
+training5: data frame based on training2 and inTrain   
+M: correlation matrix between predictiors, diagonal put to 0   
+testing5: remaining of training2, not confined to training5, used for testing purposes   
+name1: names of training5   
+model1: randomForest model based on all predictors   
+mostImp: the variables with importance scaled from 100 to 0, based on model1    
+predict1: prediction of classe based on model1 and training5    
+C1: confusionMatrix based on training5\$classe and predict1     
+insample1: in sample error, based on C1   
+result: error based on cross validation of training5   
+mostImp2: the variables with importance scaled from 100 to 0, based on model1   
+mostImp3: mostImp2 ordered   
+index: index of mostImp3   
+model2: randomForest model based on 13 most important predictors from model1   
+predict2: prediction of classe based on model2 and training5   
+C2: confusionMatrix based on training5\$classe and predict2      
+insample2: in sample error, based on C2    
+predict3: prediction of classe based on model1 and testing5      
+C3: confusionMatrix based on testing5\$classe and predict3      
+outsample1: out of sample error, based on C3   
+predict4: prediction of classe based on model2 and testing5      
+C4: confusionMatrix based on testing5\$classe and predict4    
+outsample2: out of sample error, based on C4     
+predict5: prediction of classe based on model2 and testing2    
+answer:   the character string used for the answers in part2 of the assignment     
+The system is configured as:   
+```{r}
+sessionInfo()
+```
+```{r, results='hide'}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answer)
+```
+
+
+
+
+
+
